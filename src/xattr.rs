@@ -483,4 +483,176 @@ mod tests {
         let result = state.add(attr);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_compress_decompress_roundtrip() {
+        // Every known prefix should survive a compress -> decompress cycle.
+        let names = [
+            "user.custom_key",
+            "security.selinux",
+            "trusted.overlay.opaque",
+            "system.posix_acl_access",
+            "system.posix_acl_default",
+            "system.richacl",
+            "system.other",
+        ];
+        for full_name in names {
+            let (idx, suffix) = ExtendedAttribute::compress_name(full_name);
+            let reconstructed = ExtendedAttribute::decompress_name(idx, &suffix);
+            assert_eq!(
+                reconstructed, full_name,
+                "roundtrip failed for {full_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hash_different_values() {
+        // Different values should (almost certainly) produce different hashes.
+        let a = ExtendedAttribute::new("user.test", b"value_a".to_vec());
+        let b = ExtendedAttribute::new("user.test", b"value_b".to_vec());
+        assert_ne!(a.hash(), b.hash());
+    }
+
+    #[test]
+    fn test_hash_different_names() {
+        // Different names with the same value should produce different hashes.
+        let a = ExtendedAttribute::new("user.alpha", b"same".to_vec());
+        let b = ExtendedAttribute::new("user.beta", b"same".to_vec());
+        assert_ne!(a.hash(), b.hash());
+    }
+
+    #[test]
+    fn test_hash_empty_value() {
+        // An empty value should still produce a non-zero hash (from the name).
+        let attr = ExtendedAttribute::new("user.empty", Vec::new());
+        assert_ne!(attr.hash(), 0);
+    }
+
+    #[test]
+    fn test_hash_value_with_trailing_bytes() {
+        // Value whose length is not a multiple of 4 -- exercises the tail path.
+        let attr = ExtendedAttribute::new("user.tail", vec![1, 2, 3, 4, 5]);
+        let h = attr.hash();
+        assert_ne!(h, 0);
+        // Should be deterministic.
+        assert_eq!(h, attr.hash());
+    }
+
+    #[test]
+    fn test_entry_size_alignment() {
+        // Name of exact multiple of 4 bytes: "abcd" (4 chars) + 16 header = 20
+        // -> align_up(20, 4) = 20.
+        let attr = ExtendedAttribute::new("user.abcd", vec![0]);
+        assert_eq!(attr.entry_size(), 20);
+
+        // Name of 5 bytes: "abcde" + 16 = 21 -> align_up(21, 4) = 24.
+        let attr = ExtendedAttribute::new("user.abcde", vec![0]);
+        assert_eq!(attr.entry_size(), 24);
+
+        // Empty suffix: "system.posix_acl_access" compresses to suffix ""
+        // -> 0 bytes + 16 = 16 -> aligned = 16.
+        let attr = ExtendedAttribute::new("system.posix_acl_access", vec![0]);
+        assert_eq!(attr.entry_size(), 16);
+    }
+
+    #[test]
+    fn test_value_size_alignment() {
+        // 0 bytes -> 0.
+        let attr = ExtendedAttribute::new("user.x", Vec::new());
+        assert_eq!(attr.value_size(), 0);
+
+        // 1 byte -> align_up(1, 4) = 4.
+        let attr = ExtendedAttribute::new("user.x", vec![42]);
+        assert_eq!(attr.value_size(), 4);
+
+        // 4 bytes -> 4.
+        let attr = ExtendedAttribute::new("user.x", vec![0; 4]);
+        assert_eq!(attr.value_size(), 4);
+
+        // 5 bytes -> 8.
+        let attr = ExtendedAttribute::new("user.x", vec![0; 5]);
+        assert_eq!(attr.value_size(), 8);
+    }
+
+    #[test]
+    fn test_xattr_state_multiple_inline() {
+        // Add several small attributes that all fit inline.
+        let mut state = XattrState::new(11, INODE_EXTRA_SIZE, 4096);
+        state
+            .add(ExtendedAttribute::new("user.a", vec![1]))
+            .unwrap();
+        state
+            .add(ExtendedAttribute::new("user.b", vec![2]))
+            .unwrap();
+        state
+            .add(ExtendedAttribute::new("user.c", vec![3]))
+            .unwrap();
+
+        assert!(state.has_inline());
+        assert!(!state.has_block());
+
+        let buf = state.write_inline().unwrap();
+        let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        assert_eq!(magic, XATTR_HEADER_MAGIC);
+
+        // There should be data beyond the header.
+        assert!(buf[4..].iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn test_xattr_state_mixed_inline_and_block() {
+        // Small inline capacity that fits one tiny attr, then overflow the rest.
+        // entry_size("user.a", [1]) = align_up(16 + 1, 4) = 20
+        // value_size([1]) = 4
+        // total = 24. Inline header = 4. Need at least 28 bytes inline capacity.
+        let inline_cap = 28;
+        let mut state = XattrState::new(11, inline_cap, 4096);
+        state
+            .add(ExtendedAttribute::new("user.a", vec![1]))
+            .unwrap();
+        // Second attr won't fit inline.
+        state
+            .add(ExtendedAttribute::new("user.b", vec![2]))
+            .unwrap();
+
+        assert!(state.has_inline());
+        assert!(state.has_block());
+    }
+
+    #[test]
+    fn test_write_block_sorted_output() {
+        // Attributes should be sorted by (index, name_len, name) in block output.
+        let mut state = XattrState::new(11, XATTR_INODE_HEADER_SIZE, 4096);
+        // Add in reverse order.
+        state
+            .add(ExtendedAttribute::new("user.zzz", vec![3]))
+            .unwrap();
+        state
+            .add(ExtendedAttribute::new("security.aaa", vec![1]))
+            .unwrap();
+        state
+            .add(ExtendedAttribute::new("user.aaa", vec![2]))
+            .unwrap();
+
+        let buf = state.write_block().unwrap();
+        // The block header is 32 bytes. The first entry starts at offset 32.
+        // Entry layout: [name_len(1), name_index(1), ...].
+        // security (index=6) should come before user (index=1)?
+        // Actually ext4 sorts by index numerically: 1 < 6.
+        // So user (index=1) entries first, then security (index=6).
+        let first_entry_index = buf[32 + 1]; // name_index of first entry
+        let second_entry_index = buf[32 + 1 + align_up(16 + 3, 4) as usize]; // "aaa" is 3 bytes
+        assert!(
+            first_entry_index <= second_entry_index,
+            "entries should be sorted by name_index: {} vs {}",
+            first_entry_index,
+            second_entry_index,
+        );
+    }
+
+    /// Helper matching the crate-private `align_up` for test assertions.
+    fn align_up(n: usize, align: usize) -> usize {
+        (n + align - 1) & !(align - 1)
+    }
 }

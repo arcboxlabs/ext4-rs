@@ -181,7 +181,7 @@ impl Reader {
     }
 
     /// Get a group descriptor, reading from disk on first access.
-    fn get_group_descriptor(&mut self, number: u32) -> ReadResult<GroupDescriptor> {
+    pub fn get_group_descriptor(&mut self, number: u32) -> ReadResult<GroupDescriptor> {
         if let Some(gd) = self.group_descriptors.get(&number) {
             return Ok(gd.clone());
         }
@@ -259,5 +259,123 @@ impl Reader {
         self.file
             .seek(SeekFrom::Start(block as u64 * self.block_size()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Formatter;
+
+    /// Helper: create a formatter backed by a temp file, returning the reader
+    /// after closing the formatter.
+    fn make_reader_with<F>(setup: F) -> Reader
+    where
+        F: FnOnce(&mut Formatter),
+    {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut fmt = Formatter::new(tmp.path(), 4096, 256 * 1024).unwrap();
+        setup(&mut fmt);
+        fmt.close().unwrap();
+        Reader::new(tmp.path()).unwrap()
+    }
+
+    #[test]
+    fn test_superblock_fields_after_roundtrip() {
+        let reader = make_reader_with(|_fmt| {
+            // Empty filesystem -- just root + lost+found.
+        });
+
+        let sb = reader.superblock();
+
+        // The magic number must be the ext4 signature.
+        assert_eq!(sb.magic, SUPERBLOCK_MAGIC);
+
+        // log_block_size=2 means 1024 * (1 << 2) = 4096 bytes per block.
+        assert_eq!(sb.log_block_size, 2);
+        assert_eq!(reader.block_size(), 4096);
+
+        // The first non-reserved inode must be FIRST_INODE (11).
+        assert_eq!(sb.first_ino, FIRST_INODE);
+
+        // Inode size should be 256.
+        assert_eq!(sb.inode_size, INODE_SIZE as u16);
+
+        // The extents feature flag must be set.
+        assert_ne!(sb.feature_incompat & incompat::EXTENTS, 0);
+    }
+
+    #[test]
+    fn test_children_of_root_inode() {
+        let mut reader = make_reader_with(|fmt| {
+            // Create a few entries in the root directory.
+            fmt.create(
+                "/alpha",
+                make_mode(file_mode::S_IFREG, 0o644),
+                None,
+                None,
+                Some(&mut "a".as_bytes()),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            fmt.create(
+                "/beta",
+                make_mode(file_mode::S_IFDIR, 0o755),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            fmt.create(
+                "/gamma.txt",
+                make_mode(file_mode::S_IFREG, 0o600),
+                None,
+                None,
+                Some(&mut "g".as_bytes()),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        });
+
+        let children = reader.children_of(ROOT_INODE).unwrap();
+
+        // Filter out "." and ".." to get real entries.
+        let names: Vec<&str> = children
+            .iter()
+            .filter(|(n, _)| n != "." && n != "..")
+            .map(|(n, _)| n.as_str())
+            .collect();
+
+        // lost+found is always created by the formatter, plus our three entries.
+        assert!(names.contains(&"lost+found"));
+        assert!(names.contains(&"alpha"));
+        assert!(names.contains(&"beta"));
+        assert!(names.contains(&"gamma.txt"));
+        assert_eq!(names.len(), 4);
+    }
+
+    #[test]
+    fn test_get_inode_root() {
+        let mut reader = make_reader_with(|_fmt| {});
+
+        // The root inode should be a directory.
+        let root_inode = reader.get_inode(ROOT_INODE).unwrap();
+        assert!(root_inode.is_dir());
+        assert!(!root_inode.is_reg());
+        assert!(!root_inode.is_link());
+    }
+
+    #[test]
+    fn test_block_size_calculation() {
+        // 4096-byte blocks: log_block_size should be 2.
+        let reader = make_reader_with(|_fmt| {});
+        assert_eq!(reader.block_size(), 4096);
     }
 }

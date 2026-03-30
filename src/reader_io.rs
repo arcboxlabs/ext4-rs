@@ -373,4 +373,25 @@ mod tests {
             vec!["a", ".", "b", "..", "c"]
         );
     }
+
+    #[test]
+    fn test_normalize_path_single_component() {
+        assert_eq!(normalize_path("/file.txt"), vec!["file.txt"]);
+        assert_eq!(normalize_path("file.txt"), vec!["file.txt"]);
+    }
+
+    #[test]
+    fn test_normalize_path_trailing_slash() {
+        // A trailing slash should not produce an empty trailing component.
+        assert_eq!(normalize_path("/etc/"), vec!["etc"]);
+        assert_eq!(normalize_path("/a/b/c/"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_normalize_path_deeply_nested() {
+        assert_eq!(
+            normalize_path("/a/b/c/d/e/f"),
+            vec!["a", "b", "c", "d", "e", "f"]
+        );
+    }
 }

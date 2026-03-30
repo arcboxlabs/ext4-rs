@@ -231,3 +231,134 @@ fn resolve_hardlink(
 fn io_to_format(e: std::io::Error) -> FormatError {
     FormatError::Io(e)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- preprocess_path tests -----------------------------------------------
+
+    #[test]
+    fn test_preprocess_path_relative() {
+        assert_eq!(preprocess_path(Path::new("etc/passwd")), "/etc/passwd");
+    }
+
+    #[test]
+    fn test_preprocess_path_dot_prefix() {
+        assert_eq!(preprocess_path(Path::new("./etc/passwd")), "/etc/passwd");
+    }
+
+    #[test]
+    fn test_preprocess_path_absolute() {
+        assert_eq!(preprocess_path(Path::new("/usr/bin")), "/usr/bin");
+    }
+
+    #[test]
+    fn test_preprocess_path_dot_only() {
+        // "./" stripped to "", then prepended with "/" -> "/"
+        assert_eq!(preprocess_path(Path::new("./")), "/");
+    }
+
+    #[test]
+    fn test_preprocess_path_bare_name() {
+        assert_eq!(preprocess_path(Path::new("file.txt")), "/file.txt");
+    }
+
+    // -- parent_str tests ----------------------------------------------------
+
+    #[test]
+    fn test_parent_str_root() {
+        assert_eq!(parent_str("/"), "/");
+    }
+
+    #[test]
+    fn test_parent_str_top_level() {
+        assert_eq!(parent_str("/etc"), "/");
+    }
+
+    #[test]
+    fn test_parent_str_nested() {
+        assert_eq!(parent_str("/etc/passwd"), "/etc");
+    }
+
+    #[test]
+    fn test_parent_str_deep() {
+        assert_eq!(parent_str("/a/b/c/d"), "/a/b/c");
+    }
+
+    #[test]
+    fn test_parent_str_trailing_slash() {
+        // Trailing slash is stripped before computing parent.
+        assert_eq!(parent_str("/etc/"), "/");
+    }
+
+    // -- check_acyclic tests -------------------------------------------------
+
+    #[test]
+    fn test_check_acyclic_empty() {
+        let links = HashMap::new();
+        assert!(check_acyclic(&links));
+    }
+
+    #[test]
+    fn test_check_acyclic_simple_chain() {
+        let mut links = HashMap::new();
+        links.insert(PathBuf::from("/b"), PathBuf::from("/a"));
+        links.insert(PathBuf::from("/c"), PathBuf::from("/b"));
+        assert!(check_acyclic(&links));
+    }
+
+    #[test]
+    fn test_check_acyclic_cycle() {
+        let mut links = HashMap::new();
+        links.insert(PathBuf::from("/a"), PathBuf::from("/b"));
+        links.insert(PathBuf::from("/b"), PathBuf::from("/a"));
+        assert!(!check_acyclic(&links));
+    }
+
+    #[test]
+    fn test_check_acyclic_three_node_cycle() {
+        let mut links = HashMap::new();
+        links.insert(PathBuf::from("/a"), PathBuf::from("/b"));
+        links.insert(PathBuf::from("/b"), PathBuf::from("/c"));
+        links.insert(PathBuf::from("/c"), PathBuf::from("/a"));
+        assert!(!check_acyclic(&links));
+    }
+
+    // -- resolve_hardlink tests ----------------------------------------------
+
+    #[test]
+    fn test_resolve_hardlink_direct() {
+        let mut links = HashMap::new();
+        links.insert(PathBuf::from("/link"), PathBuf::from("/target"));
+        // /target is not in the map, so it resolves immediately.
+        let resolved = resolve_hardlink(Path::new("/link"), &links);
+        assert_eq!(resolved, Some(PathBuf::from("/target")));
+    }
+
+    #[test]
+    fn test_resolve_hardlink_chain() {
+        let mut links = HashMap::new();
+        links.insert(PathBuf::from("/c"), PathBuf::from("/b"));
+        links.insert(PathBuf::from("/b"), PathBuf::from("/a"));
+        // /a is not a key, so chain resolves: /c -> /b -> /a.
+        let resolved = resolve_hardlink(Path::new("/c"), &links);
+        assert_eq!(resolved, Some(PathBuf::from("/a")));
+    }
+
+    #[test]
+    fn test_resolve_hardlink_not_found() {
+        let links = HashMap::new();
+        let resolved = resolve_hardlink(Path::new("/nonexistent"), &links);
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn test_resolve_hardlink_cycle_returns_none() {
+        let mut links = HashMap::new();
+        links.insert(PathBuf::from("/a"), PathBuf::from("/b"));
+        links.insert(PathBuf::from("/b"), PathBuf::from("/a"));
+        let resolved = resolve_hardlink(Path::new("/a"), &links);
+        assert_eq!(resolved, None);
+    }
+}

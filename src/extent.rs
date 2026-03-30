@@ -384,4 +384,119 @@ mod tests {
         write_extents(&mut inode, blocks, 4096, &mut cursor, &mut current_block).unwrap();
         assert_eq!(inode.flags & inode_flags::EXTENTS, 0);
     }
+
+    /// Depth-1 extent tree roundtrip: 5+ extents require an indexed tree
+    /// because the inode's 60-byte block field only fits 4 inline leaf entries.
+    /// We write the extents, then parse them back and verify the ranges match.
+    #[test]
+    fn test_depth1_extent_tree_roundtrip() {
+        let block_size = 4096u32;
+        // 5 extents requires 5 * MAX_BLOCKS_PER_EXTENT data blocks.
+        let data_blocks = MAX_BLOCKS_PER_EXTENT * 5;
+        let phys_start = 200u32;
+
+        let mut inode = Inode::default();
+        let blocks = BlockRange {
+            start: phys_start,
+            end: phys_start + data_blocks,
+        };
+
+        // Allocate a cursor large enough for the index (leaf) blocks.
+        // The index blocks are written at current_block * block_size.
+        // We need at most a few blocks for the tree, so 1 MiB is plenty.
+        let backing = vec![0u8; 1024 * 1024];
+        let mut cursor = Cursor::new(backing);
+        // Set current_block high enough that the index blocks don't overlap
+        // with the range [phys_start .. phys_start + data_blocks].
+        let mut current_block = phys_start + data_blocks + 10;
+
+        write_extents(
+            &mut inode,
+            blocks,
+            block_size,
+            &mut cursor,
+            &mut current_block,
+        )
+        .unwrap();
+
+        // The inode should have the EXTENTS flag.
+        assert_ne!(inode.flags & inode_flags::EXTENTS, 0);
+
+        // The header in the inode should have depth 1.
+        let header = ExtentHeader::read_from(&inode.block);
+        assert_eq!(header.magic, EXTENT_HEADER_MAGIC);
+        assert_eq!(header.depth, 1);
+        // There should be at least 1 index entry.
+        assert!(header.entries >= 1);
+
+        // Parse back and verify we get 5 ranges, each MAX_BLOCKS_PER_EXTENT long.
+        let ranges = parse_extents(&inode, block_size as u64, &mut cursor).unwrap();
+        assert_eq!(ranges.len(), 5);
+
+        let mut expected_phys = phys_start;
+        for (i, &(start, end)) in ranges.iter().enumerate() {
+            assert_eq!(
+                start, expected_phys,
+                "extent {} start mismatch: expected {} got {}",
+                i, expected_phys, start
+            );
+            assert_eq!(
+                end - start,
+                MAX_BLOCKS_PER_EXTENT,
+                "extent {} length mismatch",
+                i
+            );
+            expected_phys += MAX_BLOCKS_PER_EXTENT;
+        }
+    }
+
+    /// Depth-1 with a non-even split: 6 extents where the last is shorter.
+    #[test]
+    fn test_depth1_extent_tree_uneven() {
+        let block_size = 4096u32;
+        let extra = 42u32;
+        let data_blocks = MAX_BLOCKS_PER_EXTENT * 5 + extra;
+        let phys_start = 100u32;
+
+        let mut inode = Inode::default();
+        let blocks = BlockRange {
+            start: phys_start,
+            end: phys_start + data_blocks,
+        };
+
+        let backing = vec![0u8; 1024 * 1024];
+        let mut cursor = Cursor::new(backing);
+        let mut current_block = phys_start + data_blocks + 10;
+
+        write_extents(
+            &mut inode,
+            blocks,
+            block_size,
+            &mut cursor,
+            &mut current_block,
+        )
+        .unwrap();
+
+        let ranges = parse_extents(&inode, block_size as u64, &mut cursor).unwrap();
+        assert_eq!(ranges.len(), 6);
+
+        // First 5 extents should be full-size.
+        for i in 0..5 {
+            assert_eq!(
+                ranges[i].1 - ranges[i].0,
+                MAX_BLOCKS_PER_EXTENT,
+                "extent {} should be full",
+                i
+            );
+        }
+        // Last extent should be the remainder.
+        assert_eq!(ranges[5].1 - ranges[5].0, extra);
+
+        // Verify physical contiguity.
+        let mut expected_phys = phys_start;
+        for &(start, end) in &ranges {
+            assert_eq!(start, expected_phys);
+            expected_phys = end;
+        }
+    }
 }
