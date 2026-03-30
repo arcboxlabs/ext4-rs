@@ -4,8 +4,8 @@
 // Reader's low-level APIs to verify on-disk structures (superblock, group
 // descriptors, inodes, bitmaps) match expected values.
 
-use ext4::constants::*;
-use ext4::{Formatter, Reader};
+use arcbox_ext4::constants::*;
+use arcbox_ext4::{Formatter, Reader};
 use std::io::{Read, Seek, SeekFrom};
 use tempfile::NamedTempFile;
 

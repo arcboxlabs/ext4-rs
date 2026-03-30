@@ -1,8 +1,8 @@
 // Minimal reproduction tests for 4 bugs reported by Codex.
 // Each test is designed to trigger the specific bug if it exists.
 
-use ext4::constants::*;
-use ext4::{Formatter, Reader};
+use arcbox_ext4::constants::*;
+use arcbox_ext4::{Formatter, Reader};
 use tempfile::NamedTempFile;
 
 fn new_formatter() -> (Formatter, NamedTempFile) {

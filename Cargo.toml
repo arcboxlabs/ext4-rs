@@ -1,9 +1,12 @@
 [package]
-name = "ext4"
+name = "arcbox-ext4"
 version = "0.1.0"
 edition = "2024"
 description = "Pure-Rust ext4 filesystem formatter and reader for container images"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/arcboxlabs/ext4-rs"
+keywords = ["ext4", "filesystem", "container", "oci", "mkfs"]
+categories = ["filesystem", "os"]
 
 [dependencies]
 thiserror = "2"

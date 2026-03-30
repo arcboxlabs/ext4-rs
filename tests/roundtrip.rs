@@ -1,8 +1,8 @@
 // Integration tests: create ext4 images with the Formatter, then verify
 // them with the Reader.
 
-use ext4::constants::*;
-use ext4::{Formatter, Reader};
+use arcbox_ext4::constants::*;
+use arcbox_ext4::{Formatter, Reader};
 use tempfile::NamedTempFile;
 
 /// Helper: create a formatter backed by a temporary file.
@@ -618,21 +618,21 @@ fn test_read_nonexistent_path() {
     // stat() should return PathNotFound.
     let err = reader.stat("/nonexistent").unwrap_err();
     assert!(
-        matches!(err, ext4::error::ReadError::PathNotFound(_)),
+        matches!(err, arcbox_ext4::error::ReadError::PathNotFound(_)),
         "expected PathNotFound, got: {err:?}"
     );
 
     // read_file() should return PathNotFound.
     let err = reader.read_file("/nonexistent", 0, None).unwrap_err();
     assert!(
-        matches!(err, ext4::error::ReadError::PathNotFound(_)),
+        matches!(err, arcbox_ext4::error::ReadError::PathNotFound(_)),
         "expected PathNotFound, got: {err:?}"
     );
 
     // list_dir() should return PathNotFound.
     let err = reader.list_dir("/nonexistent").unwrap_err();
     assert!(
-        matches!(err, ext4::error::ReadError::PathNotFound(_)),
+        matches!(err, arcbox_ext4::error::ReadError::PathNotFound(_)),
         "expected PathNotFound, got: {err:?}"
     );
 }
@@ -664,7 +664,7 @@ fn test_read_file_on_directory() {
     // read_file on a directory should return IsDirectory.
     let err = reader.read_file("/mydir", 0, None).unwrap_err();
     assert!(
-        matches!(err, ext4::error::ReadError::IsDirectory(_)),
+        matches!(err, arcbox_ext4::error::ReadError::IsDirectory(_)),
         "expected IsDirectory, got: {err:?}"
     );
 }
@@ -696,7 +696,7 @@ fn test_list_dir_on_file() {
     // list_dir on a regular file should return NotADirectory.
     let err = reader.list_dir("/file.txt").unwrap_err();
     assert!(
-        matches!(err, ext4::error::ReadError::NotADirectory(_)),
+        matches!(err, arcbox_ext4::error::ReadError::NotADirectory(_)),
         "expected NotADirectory, got: {err:?}"
     );
 }
@@ -716,7 +716,7 @@ fn test_invalid_image() {
         f.write_all(&[0u8; 4096]).unwrap();
     }
     match Reader::new(tmp_zeros.path()) {
-        Err(ext4::error::ReadError::InvalidSuperBlock) => {} // expected
+        Err(arcbox_ext4::error::ReadError::InvalidSuperBlock) => {} // expected
         Err(other) => panic!("expected InvalidSuperBlock for all-zeros, got: {other:?}"),
         Ok(_) => panic!("expected InvalidSuperBlock for all-zeros, but got Ok"),
     }
@@ -729,7 +729,7 @@ fn test_invalid_image() {
         f.write_all(&garbage).unwrap();
     }
     match Reader::new(tmp_garbage.path()) {
-        Err(ext4::error::ReadError::InvalidSuperBlock) => {} // expected
+        Err(arcbox_ext4::error::ReadError::InvalidSuperBlock) => {} // expected
         Err(other) => panic!("expected InvalidSuperBlock for garbage, got: {other:?}"),
         Ok(_) => panic!("expected InvalidSuperBlock for garbage, but got Ok"),
     }
@@ -775,13 +775,13 @@ fn test_symlink_loop_detection() {
     // Following the symlink cycle should produce SymlinkLoop.
     let err = reader.read_file("/link_a", 0, None).unwrap_err();
     assert!(
-        matches!(err, ext4::error::ReadError::SymlinkLoop(_)),
+        matches!(err, arcbox_ext4::error::ReadError::SymlinkLoop(_)),
         "expected SymlinkLoop, got: {err:?}"
     );
 
     let err = reader.stat("/link_b").unwrap_err();
     assert!(
-        matches!(err, ext4::error::ReadError::SymlinkLoop(_)),
+        matches!(err, arcbox_ext4::error::ReadError::SymlinkLoop(_)),
         "expected SymlinkLoop, got: {err:?}"
     );
 }

@@ -8,7 +8,7 @@
 //!
 //! ```no_run
 //! use std::path::Path;
-//! use ext4::Formatter;
+//! use arcbox_ext4::Formatter;
 //!
 //! // Create a new ext4 image.
 //! let mut fmt = Formatter::new(Path::new("rootfs.ext4"), 4096, 256 * 1024).unwrap();
@@ -17,7 +17,7 @@
 //! fmt.close().unwrap();
 //!
 //! // Read it back.
-//! let mut reader = ext4::Reader::new(Path::new("rootfs.ext4")).unwrap();
+//! let mut reader = arcbox_ext4::Reader::new(Path::new("rootfs.ext4")).unwrap();
 //! let data = reader.read_file("/hello.txt", 0, None).unwrap();
 //! assert_eq!(&data, b"hello world");
 //! ```

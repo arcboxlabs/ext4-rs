@@ -11,8 +11,8 @@
 
 use std::io::Cursor;
 
-use ext4::constants::*;
-use ext4::{Formatter, Reader};
+use arcbox_ext4::constants::*;
+use arcbox_ext4::{Formatter, Reader};
 use tempfile::NamedTempFile;
 
 /// Helper: create a formatter backed by a temporary file.
