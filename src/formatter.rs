@@ -64,6 +64,10 @@ pub struct Formatter {
     inodes: Vec<Inode>,
     tree: FileTree,
     deleted_blocks: Vec<BlockRange>,
+    /// Block ranges owned by inodes that still have links_count > 0 but
+    /// whose original tree node has been detached.  Keyed by inode number.
+    /// Used to reclaim blocks when the last hard-link reference is removed.
+    deferred_blocks: HashMap<u32, Vec<BlockRange>>,
 }
 
 impl Formatter {
@@ -137,10 +141,9 @@ impl Formatter {
         // Only 4096-byte blocks are supported.  Supporting smaller block sizes
         // (1024, 2048) would require first_data_block=1 and different group
         // descriptor offset calculations throughout the formatter and reader.
-        assert!(
-            block_size == 4096,
-            "only 4096-byte block size is supported (got {block_size})"
-        );
+        if block_size != 4096 {
+            return Err(FormatError::UnsupportedBlockSize(block_size));
+        }
 
         let file = OpenOptions::new()
             .read(true)
@@ -172,6 +175,7 @@ impl Formatter {
             inodes,
             tree,
             deleted_blocks: Vec::new(),
+            deferred_blocks: HashMap::new(),
         };
 
         // Seek past the superblock (block 0) and the group descriptor table.
@@ -566,40 +570,58 @@ impl Formatter {
             self.tree.remove_child(parent_idx, basename(path));
         }
 
-        // If this node is a hard-link entry, decrement the target's link
-        // count but do NOT touch the target inode's data -- other paths may
-        // still reference it.
-        if let Some(linked_ino) = self.tree.node(node_idx).link {
-            let li = (linked_ino - 1) as usize;
-            if self.inodes[li].links_count > 1 {
-                self.inodes[li].links_count -= 1;
-            }
-            // Hard-link nodes are lightweight placeholders; they have no
-            // dedicated inode or data blocks to free.
-            return Ok(());
-        }
+        // Determine which inode to decrement and potentially reclaim.
+        // For hard-link entries the target inode is the one that matters;
+        // for regular entries it is the node's own inode.
+        let (target_ino, target_idx) =
+            if let Some(linked_ino) = self.tree.node(node_idx).link {
+                (linked_ino, (linked_ino - 1) as usize)
+            } else {
+                (inode_num, inode_idx)
+            };
 
-        // For the original (non-hardlink) inode: decrement links_count.
-        // Only zero out the inode and reclaim blocks when the count drops
-        // to zero, meaning no remaining directory entries reference it.
-        if inode_num > FIRST_INODE - 1 {
-            if self.inodes[inode_idx].links_count > 0 {
-                self.inodes[inode_idx].links_count -= 1;
+        if target_ino > FIRST_INODE - 1 {
+            if self.inodes[target_idx].links_count > 0 {
+                self.inodes[target_idx].links_count -= 1;
             }
 
-            if self.inodes[inode_idx].links_count == 0 {
-                if let Some(blocks) = self.tree.node(node_idx).blocks {
-                    if blocks.start != blocks.end {
-                        self.deleted_blocks.push(blocks);
-                    }
+            // Collect block ranges from this tree node (if any).
+            let node = self.tree.node(node_idx);
+            let mut node_blocks: Vec<BlockRange> = Vec::new();
+            if let Some(b) = node.blocks {
+                if b.start != b.end {
+                    node_blocks.push(b);
                 }
-                for blk in &self.tree.node(node_idx).additional_blocks {
+            }
+            for blk in &node.additional_blocks {
+                node_blocks.push(*blk);
+            }
+
+            if self.inodes[target_idx].links_count == 0 {
+                // Last reference removed -- reclaim blocks and mark deleted.
+                // Blocks may come from this node (if it is the original) or
+                // from deferred_blocks (if the original was unlinked earlier
+                // while hard links still existed).
+                for blk in &node_blocks {
                     self.deleted_blocks.push(*blk);
+                }
+                if let Some(deferred) = self.deferred_blocks.remove(&target_ino) {
+                    for blk in deferred {
+                        self.deleted_blocks.push(blk);
+                    }
                 }
 
                 let (now_lo, _) = timestamp_now();
-                self.inodes[inode_idx] = Inode::default();
-                self.inodes[inode_idx].dtime = now_lo;
+                self.inodes[target_idx] = Inode::default();
+                self.inodes[target_idx].dtime = now_lo;
+            } else if !node_blocks.is_empty() {
+                // The original node is being removed but the inode still has
+                // remaining hard-link references.  Stash the block ranges so
+                // they can be reclaimed when the last link is finally deleted.
+                self.deferred_blocks
+                    .entry(target_ino)
+                    .or_default()
+                    .extend(node_blocks);
             }
         }
 

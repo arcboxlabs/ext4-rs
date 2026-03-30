@@ -64,6 +64,8 @@ pub enum FormatError {
     InsufficientSpaceForGroupDescriptorBlocks,
     #[error("cannot create hard links to directory target: {0}")]
     CannotHardlinkDirectory(PathBuf),
+    #[error("unsupported block size {0} (only 4096 is supported)")]
+    UnsupportedBlockSize(u32),
     #[error("cannot truncate file: {0}")]
     CannotTruncateFile(PathBuf),
     #[error("cannot create sparse file at {0}")]
