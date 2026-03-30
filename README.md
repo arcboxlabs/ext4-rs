@@ -96,7 +96,7 @@ fmt.close()?;
 
 ```
                     ┌─────────────┐
-   OCI tar layers ──▶│  unpack.rs  │
+  OCI tar layers ──▶│  unpack.rs  │
                     └──────┬──────┘
                            ▼
                     ┌─────────────┐         ┌─────────────┐
@@ -105,7 +105,7 @@ fmt.close()?;
                                             └──────┬──────┘
                                                    ▼
                                             ┌─────────────┐
-                    user code ────────────▶ │  reader.rs   │
+                    user code ────────────▶ │  reader.rs  │
                                             └─────────────┘
 ```
 

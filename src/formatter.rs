@@ -465,6 +465,67 @@ impl Formatter {
         Ok(())
     }
 
+    // -- Query helpers (for Ext4Writer / layer.rs) --------------------------
+
+    /// Check whether `path` exists in the in-memory file tree.
+    pub fn exists(&self, path: &str) -> bool {
+        self.tree.lookup(&std::path::PathBuf::from(path)).is_some()
+    }
+
+    /// Check whether `path` exists and is a directory.
+    pub fn is_dir(&self, path: &str) -> bool {
+        let path_buf = std::path::PathBuf::from(path);
+        if let Some(idx) = self.tree.lookup(&path_buf) {
+            let ino = self.tree.node(idx).inode;
+            self.inodes[(ino - 1) as usize].is_dir()
+        } else {
+            false
+        }
+    }
+
+    /// List the names of immediate children of a directory (excluding `.`
+    /// and `..`).  Returns an empty vec if `path` is not a directory.
+    pub fn list_dir(&self, path: &str) -> Vec<String> {
+        let path_buf = std::path::PathBuf::from(path);
+        let Some(idx) = self.tree.lookup(&path_buf) else {
+            return Vec::new();
+        };
+        self.tree
+            .node(idx)
+            .children
+            .iter()
+            .map(|&ci| self.tree.node(ci).name.clone())
+            .collect()
+    }
+
+    /// Update the permission bits of an existing entry.
+    pub fn set_permissions(&mut self, path: &str, mode: u16) -> FormatResult<()> {
+        let path_buf = std::path::PathBuf::from(path);
+        let idx = self
+            .tree
+            .lookup(&path_buf)
+            .ok_or_else(|| FormatError::NotFound(path_buf))?;
+        let ino = self.tree.node(idx).inode;
+        let inode = &mut self.inodes[(ino - 1) as usize];
+        // Preserve the file-type bits, replace the permission bits.
+        inode.mode = (inode.mode & file_mode::TYPE_MASK) | (mode & !file_mode::TYPE_MASK);
+        Ok(())
+    }
+
+    /// Update the owner uid/gid of an existing entry.
+    pub fn set_owner(&mut self, path: &str, uid: u32, gid: u32) -> FormatResult<()> {
+        let path_buf = std::path::PathBuf::from(path);
+        let idx = self
+            .tree
+            .lookup(&path_buf)
+            .ok_or_else(|| FormatError::NotFound(path_buf))?;
+        let ino = self.tree.node(idx).inode;
+        let inode = &mut self.inodes[(ino - 1) as usize];
+        inode.set_uid(uid);
+        inode.set_gid(gid);
+        Ok(())
+    }
+
     // -- link() ------------------------------------------------------------
 
     /// Create a hard link at `link_path` pointing to `target_path`.
