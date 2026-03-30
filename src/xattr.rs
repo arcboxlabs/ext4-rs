@@ -197,15 +197,16 @@ impl XattrState {
     pub fn add(&mut self, attr: ExtendedAttribute) -> Result<(), FormatError> {
         let total = attr.total_size();
 
-        // Try inline first.
-        if self.used_inline + total <= self.inode_capacity {
+        // Try inline first.  Reserve 4 bytes for the null terminator that
+        // marks the end of the entry list (required by ext4 readers).
+        if self.used_inline + total + 4 <= self.inode_capacity {
             self.used_inline += total;
             self.inline_attrs.push(attr);
             return Ok(());
         }
 
-        // Fall back to block.
-        if self.used_block + total <= self.block_capacity {
+        // Fall back to block.  Same 4-byte null terminator reservation.
+        if self.used_block + total + 4 <= self.block_capacity {
             self.used_block += total;
             self.block_attrs.push(attr);
             return Ok(());
@@ -605,8 +606,9 @@ mod tests {
         // Small inline capacity that fits one tiny attr, then overflow the rest.
         // entry_size("user.a", [1]) = align_up(16 + 1, 4) = 20
         // value_size([1]) = 4
-        // total = 24. Inline header = 4. Need at least 28 bytes inline capacity.
-        let inline_cap = 28;
+        // total = 24. Inline header = 4. Plus 4-byte null terminator reservation.
+        // Need at least 4 + 24 + 4 = 32 bytes inline capacity.
+        let inline_cap = 32;
         let mut state = XattrState::new(11, inline_cap, 4096);
         state
             .add(ExtendedAttribute::new("user.a", vec![1]))

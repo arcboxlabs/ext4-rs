@@ -134,6 +134,14 @@ impl Formatter {
     /// `/lost+found` directory (required by e2fsck) are created
     /// automatically.
     pub fn new(path: &Path, block_size: u32, min_disk_size: u64) -> FormatResult<Self> {
+        // Only 4096-byte blocks are supported.  Supporting smaller block sizes
+        // (1024, 2048) would require first_data_block=1 and different group
+        // descriptor offset calculations throughout the formatter and reader.
+        assert!(
+            block_size == 4096,
+            "only 4096-byte block size is supported (got {block_size})"
+        );
+
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -211,23 +219,29 @@ impl Formatter {
             let existing_inode = &self.inodes[(existing_inode_num - 1) as usize];
 
             if is_dir(mode) {
-                // mkdir -p: if the existing entry is already a directory (or a
-                // symlink that can be replaced), just update ownership and
-                // return.
-                if !existing_inode.is_dir() && !existing_inode.is_link() {
+                if existing_inode.is_dir() {
+                    // mkdir -p: directory already exists.  Only update mode
+                    // and ownership when the caller explicitly provided them
+                    // (uid/gid != None).  This prevents recursive parent-
+                    // creation from silently downgrading permissions set by
+                    // an earlier explicit create() call.
+                    if self.tree.node(existing_idx).name == basename(path) {
+                        if uid.is_some() || gid.is_some() {
+                            let inode =
+                                &mut self.inodes[(existing_inode_num - 1) as usize];
+                            inode.mode = mode;
+                            if let Some(u) = uid {
+                                inode.set_uid(u);
+                            }
+                            if let Some(g) = gid {
+                                inode.set_gid(g);
+                            }
+                        }
+                        return Ok(());
+                    }
+                } else {
+                    // A regular file (or other non-dir) blocks directory creation.
                     return Err(FormatError::NotDirectory(path_buf));
-                }
-                if self.tree.node(existing_idx).name == basename(path) {
-                    // Update mode / uid / gid on the existing directory.
-                    let inode = &mut self.inodes[(existing_inode_num - 1) as usize];
-                    inode.mode = mode;
-                    if let Some(u) = uid {
-                        inode.set_uid(u);
-                    }
-                    if let Some(g) = gid {
-                        inode.set_gid(g);
-                    }
-                    return Ok(());
                 }
             } else if self.tree.node(existing_idx).link.is_some() {
                 // Hard-link entries can always be overwritten.
@@ -306,8 +320,13 @@ impl Formatter {
                     self.align_to_block()?;
                     child_inode.xattr_block_lo = self.current_block();
                     self.file.write_all(&block_buf)?;
-                    // Account for the xattr block in the inode's sector count.
-                    child_inode.blocks_lo += (self.block_size / 512) as u32;
+                    // Account for the xattr block.  When HUGE_FILE is set,
+                    // blocks_lo is in filesystem-block units; otherwise sectors.
+                    if child_inode.flags & inode_flags::HUGE_FILE != 0 {
+                        child_inode.blocks_lo += 1;
+                    } else {
+                        child_inode.blocks_lo += (self.block_size / 512) as u32;
+                    }
                 }
             }
         }
@@ -547,28 +566,41 @@ impl Formatter {
             self.tree.remove_child(parent_idx, basename(path));
         }
 
-        // If this node is a hard link, decrement the target's link count.
+        // If this node is a hard-link entry, decrement the target's link
+        // count but do NOT touch the target inode's data -- other paths may
+        // still reference it.
         if let Some(linked_ino) = self.tree.node(node_idx).link {
             let li = (linked_ino - 1) as usize;
-            if self.inodes[li].links_count > 2 {
+            if self.inodes[li].links_count > 1 {
                 self.inodes[li].links_count -= 1;
             }
+            // Hard-link nodes are lightweight placeholders; they have no
+            // dedicated inode or data blocks to free.
+            return Ok(());
         }
 
-        // Only free blocks / zero inode for non-reserved inodes.
+        // For the original (non-hardlink) inode: decrement links_count.
+        // Only zero out the inode and reclaim blocks when the count drops
+        // to zero, meaning no remaining directory entries reference it.
         if inode_num > FIRST_INODE - 1 {
-            if let Some(blocks) = self.tree.node(node_idx).blocks {
-                if blocks.start != blocks.end {
-                    self.deleted_blocks.push(blocks);
-                }
-            }
-            for blk in &self.tree.node(node_idx).additional_blocks {
-                self.deleted_blocks.push(*blk);
+            if self.inodes[inode_idx].links_count > 0 {
+                self.inodes[inode_idx].links_count -= 1;
             }
 
-            let (now_lo, _) = timestamp_now();
-            self.inodes[inode_idx] = Inode::default();
-            self.inodes[inode_idx].dtime = now_lo;
+            if self.inodes[inode_idx].links_count == 0 {
+                if let Some(blocks) = self.tree.node(node_idx).blocks {
+                    if blocks.start != blocks.end {
+                        self.deleted_blocks.push(blocks);
+                    }
+                }
+                for blk in &self.tree.node(node_idx).additional_blocks {
+                    self.deleted_blocks.push(*blk);
+                }
+
+                let (now_lo, _) = timestamp_now();
+                self.inodes[inode_idx] = Inode::default();
+                self.inodes[inode_idx].dtime = now_lo;
+            }
         }
 
         Ok(())
@@ -869,8 +901,10 @@ impl Formatter {
         sb.free_blocks_count_hi = (total_free_blocks >> 32) as u32;
         sb.free_inodes_count = free_inodes;
         sb.first_data_block = 0;
-        sb.log_block_size = 2; // 4096-byte blocks
-        sb.log_cluster_size = 2;
+        // log_block_size = log2(block_size / 1024).  E.g. 1024->0, 2048->1, 4096->2.
+        let log_bs = (self.block_size / 1024).trailing_zeros();
+        sb.log_block_size = log_bs;
+        sb.log_cluster_size = log_bs;
         sb.blocks_per_group = self.blocks_per_group();
         sb.clusters_per_group = self.blocks_per_group();
         sb.inodes_per_group = inodes_per_group;

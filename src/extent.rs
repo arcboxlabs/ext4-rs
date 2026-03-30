@@ -118,9 +118,15 @@ fn write_inline_extents(
 
     inode.block = buf;
 
-    // blocks_lo is in units of 512-byte sectors.
-    let sectors = (data_blocks as u64) * (block_size as u64 / 512);
-    inode.blocks_lo = sectors as u32;
+    // When the HUGE_FILE inode flag is set (and the ro_compat HUGE_FILE
+    // feature is enabled on the filesystem), blocks_lo counts in units of
+    // filesystem blocks.  Otherwise it counts 512-byte sectors.
+    if inode.flags & inode_flags::HUGE_FILE != 0 {
+        inode.blocks_lo = data_blocks;
+    } else {
+        let sectors = (data_blocks as u64) * (block_size as u64 / 512);
+        inode.blocks_lo = sectors as u32;
+    }
     inode.flags |= inode_flags::EXTENTS;
 }
 
@@ -220,10 +226,14 @@ fn write_indexed_extents<W: Write + Seek>(
         *current_block += 1;
     }
 
-    // blocks_lo accounts for data blocks plus the index blocks, in 512-byte sectors.
+    // blocks_lo accounts for data blocks plus the index (metadata) blocks.
     let total_blocks = data_blocks + num_index_blocks;
-    let sectors = (total_blocks as u64) * (block_size as u64 / 512);
-    inode.blocks_lo = sectors as u32;
+    if inode.flags & inode_flags::HUGE_FILE != 0 {
+        inode.blocks_lo = total_blocks;
+    } else {
+        let sectors = (total_blocks as u64) * (block_size as u64 / 512);
+        inode.blocks_lo = sectors as u32;
+    }
     inode.flags |= inode_flags::EXTENTS;
 
     Ok(())

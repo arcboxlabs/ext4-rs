@@ -58,13 +58,18 @@ impl Formatter {
             }
 
             // ── Hard links (deferred) ──
-            if let Some(link_target) = entry.link_name().map_err(io_to_format)? {
-                let target_str = preprocess_path(&link_target.into_owned());
-                hardlinks.insert(
-                    PathBuf::from(&path_str),
-                    PathBuf::from(target_str),
-                );
-                continue;
+            // Only treat entries whose type is explicitly `Link` (hard link).
+            // Symlinks also populate `link_name()`, but they must be handled
+            // in the entry-type dispatch below.
+            if entry.header().entry_type() == tar::EntryType::Link {
+                if let Some(link_target) = entry.link_name().map_err(io_to_format)? {
+                    let target_str = preprocess_path(&link_target.into_owned());
+                    hardlinks.insert(
+                        PathBuf::from(&path_str),
+                        PathBuf::from(target_str),
+                    );
+                    continue;
+                }
             }
 
             // ── Timestamps ──
