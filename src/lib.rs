@@ -35,5 +35,5 @@ pub mod unpack;
 pub mod xattr;
 
 // Re-export the primary public types at the crate root.
-pub use formatter::{FileTimestamps, Formatter};
+pub use formatter::{FileTimestamps, FormatOptions, Formatter};
 pub use reader::Reader;

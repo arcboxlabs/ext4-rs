@@ -9,6 +9,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use uuid::Uuid;
+
 use crate::constants::*;
 use crate::dir;
 use crate::error::{FormatError, FormatResult};
@@ -16,6 +18,76 @@ use crate::extent;
 use crate::file_tree::{BlockRange, FileTree, FileTreeNode, InodeNumber};
 use crate::types::*;
 use crate::xattr::{ExtendedAttribute, XattrState};
+
+/// Maximum bytes that fit in the ext4 superblock's `volume_name` field.
+const VOLUME_NAME_LEN: usize = 16;
+
+// ---------------------------------------------------------------------------
+// FormatOptions
+// ---------------------------------------------------------------------------
+
+/// Parameters for creating a new ext4 image.
+///
+/// Construct via [`FormatOptions::new`] and layer on [`uuid`] / [`label`] as
+/// needed. The resulting options are passed to [`Formatter::with_options`].
+///
+/// [`uuid`]: Self::uuid
+/// [`label`]: Self::label
+#[derive(Clone, Debug)]
+pub struct FormatOptions {
+    /// Block size in bytes. Only 4096 is currently accepted; the field is
+    /// explicit so future versions can widen the accepted set without another
+    /// API break.
+    pub block_size: u32,
+    /// Total size of the image file in bytes.
+    pub size: u64,
+    /// UUID written to the superblock. `None` picks a random v4 UUID at
+    /// format time.
+    pub uuid: Option<Uuid>,
+    /// Volume label. Must be ≤ 16 bytes UTF-8 and contain no NUL bytes.
+    /// `None` leaves the field zeroed.
+    pub label: Option<String>,
+}
+
+impl FormatOptions {
+    /// Create options for an image of the given size, with default
+    /// `block_size = 4096`, random UUID, no label.
+    pub fn new(size: u64) -> Self {
+        Self {
+            block_size: 4096,
+            size,
+            uuid: None,
+            label: None,
+        }
+    }
+
+    /// Set an explicit UUID instead of a randomly generated one.
+    pub fn uuid(mut self, uuid: Uuid) -> Self {
+        self.uuid = Some(uuid);
+        self
+    }
+
+    /// Set the volume label.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+}
+
+fn validate_label(label: &str) -> FormatResult<()> {
+    if label.as_bytes().len() > VOLUME_NAME_LEN {
+        return Err(FormatError::InvalidLabel(format!(
+            "label {label:?} is {} bytes, ext4 limit is {VOLUME_NAME_LEN}",
+            label.as_bytes().len()
+        )));
+    }
+    if label.contains('\0') {
+        return Err(FormatError::InvalidLabel(format!(
+            "label {label:?} contains a NUL byte"
+        )));
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // FileTimestamps
@@ -68,6 +140,12 @@ pub struct Formatter {
     /// whose original tree node has been detached.  Keyed by inode number.
     /// Used to reclaim blocks when the last hard-link reference is removed.
     deferred_blocks: HashMap<u32, Vec<BlockRange>>,
+    /// UUID to write into the superblock. `None` triggers a random v4 at
+    /// format time.
+    uuid: Option<Uuid>,
+    /// Volume label to copy into the superblock's `volume_name` field. Validated
+    /// on construction.
+    label: Option<String>,
 }
 
 impl Formatter {
@@ -133,16 +211,24 @@ impl Formatter {
 
     /// Create a new formatter that writes an ext4 image to `path`.
     ///
-    /// The file is truncated and re-created as a sparse file of
-    /// `min_disk_size` bytes.  The root directory (inode 2) and the
-    /// `/lost+found` directory (required by e2fsck) are created
-    /// automatically.
-    pub fn new(path: &Path, block_size: u32, min_disk_size: u64) -> FormatResult<Self> {
+    /// The file is truncated and re-created as a sparse file of `opts.size`
+    /// bytes. The root directory (inode 2) and the `/lost+found` directory
+    /// (required by e2fsck) are created automatically.
+    ///
+    /// Only `opts.block_size == 4096` is currently accepted; other values
+    /// return [`FormatError::UnsupportedBlockSize`]. Labels are validated
+    /// eagerly — an oversize or NUL-containing label returns
+    /// [`FormatError::InvalidLabel`] before any file work happens.
+    pub fn with_options(path: &Path, opts: FormatOptions) -> FormatResult<Self> {
         // Only 4096-byte blocks are supported.  Supporting smaller block sizes
         // (1024, 2048) would require first_data_block=1 and different group
         // descriptor offset calculations throughout the formatter and reader.
-        if block_size != 4096 {
-            return Err(FormatError::UnsupportedBlockSize(block_size));
+        if opts.block_size != 4096 {
+            return Err(FormatError::UnsupportedBlockSize(opts.block_size));
+        }
+
+        if let Some(label) = &opts.label {
+            validate_label(label)?;
         }
 
         let file = OpenOptions::new()
@@ -153,7 +239,7 @@ impl Formatter {
             .open(path)?;
 
         // Create a sparse file.
-        file.set_len(min_disk_size)?;
+        file.set_len(opts.size)?;
 
         // Reserve the first 10 inodes (indices 0..9  =>  inode numbers 1..10).
         //   [0] = defective block inode  (empty / default)
@@ -170,12 +256,14 @@ impl Formatter {
 
         let mut fmt = Self {
             file,
-            block_size,
-            size: min_disk_size,
+            block_size: opts.block_size,
+            size: opts.size,
             inodes,
             tree,
             deleted_blocks: Vec::new(),
             deferred_blocks: HashMap::new(),
+            uuid: opts.uuid,
+            label: opts.label,
         };
 
         // Seek past the superblock (block 0) and the group descriptor table.
@@ -195,6 +283,23 @@ impl Formatter {
         )?;
 
         Ok(fmt)
+    }
+
+    /// Create a new formatter with defaults for UUID (random) and label (empty).
+    ///
+    /// Thin shim over [`Formatter::with_options`] for the common case where
+    /// only the image size matters. Callers that need a specific UUID or
+    /// volume label should use `with_options` directly.
+    pub fn new(path: &Path, block_size: u32, min_disk_size: u64) -> FormatResult<Self> {
+        Self::with_options(
+            path,
+            FormatOptions {
+                block_size,
+                size: min_disk_size,
+                uuid: None,
+                label: None,
+            },
+        )
     }
 
     // -- create() ----------------------------------------------------------
@@ -1007,7 +1112,11 @@ impl Formatter {
         sb.min_extra_isize = EXTRA_ISIZE;
         sb.want_extra_isize = EXTRA_ISIZE;
         sb.log_groups_per_flex = 31;
-        sb.uuid = *uuid::Uuid::new_v4().as_bytes();
+        sb.uuid = *self.uuid.unwrap_or_else(Uuid::new_v4).as_bytes();
+        if let Some(label) = &self.label {
+            let bytes = label.as_bytes();
+            sb.volume_name[..bytes.len()].copy_from_slice(bytes);
+        }
 
         // Write: 1024 zero bytes (boot sector) + superblock + 2048 zero bytes.
         self.seek_to_block(0)?;
